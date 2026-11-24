@@ -4,6 +4,8 @@
 
 - `app record` and `app replay` fail with `port <port> is already in use` before spawning a server
   on an occupied port and check whether the child exited before treating the port as ready (#326).
+- `Err("Outer+Inner: message")` in a C# port throws the nested exception the recording names,
+  like `Acme.Parser+ParseException`, instead of falling back to `InvalidOperationException` (#363).
 
 ## 4.0.0 (2026-11-24)
 

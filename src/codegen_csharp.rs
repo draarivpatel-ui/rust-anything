@@ -465,7 +465,7 @@ const CODEC_CS: &str = r#"    __VISIBILITY__ static class __CODEC__
         internal static global::System.Exception Error(string message)
         {
             var i = message.IndexOf(": ", global::System.StringComparison.Ordinal);
-            if (i > 0 && global::System.Text.RegularExpressions.Regex.IsMatch(message.Substring(0, i), @"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$"))
+            if (i > 0 && global::System.Text.RegularExpressions.Regex.IsMatch(message.Substring(0, i), @"^[A-Za-z_][A-Za-z0-9_]*([.+][A-Za-z_][A-Za-z0-9_]*)*$"))
             {
                 var name = message.Substring(0, i);
                 var type = global::System.Type.GetType(name);

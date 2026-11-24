@@ -27,7 +27,7 @@ where the language allows it:
 | JavaScript | a built-in error name | `globalThis` (`TypeError`, `RangeError`, …) | `Error` |
 | Go | not a type: the string is the `error` value | — | — |
 | Java, Kotlin | a bare or package-qualified class | the JDK packages, then its own | `RuntimeException` |
-| C# | a full .NET type name | every loaded assembly (`Acme.Errors.ParseError`) | `InvalidOperationException` |
+| C# | a full .NET type name | every loaded assembly (`Acme.Errors.ParseError`, a nested type as `Acme.Parser+ParseException`) | `InvalidOperationException` |
 | PHP | a class name with `\` separators | `class_exists`, and it must be a `Throwable` | `RuntimeException` |
 | PowerShell | a .NET type name | `-as [type]`, and it must be an `Exception` | `RuntimeException` |
 

@@ -1789,6 +1789,7 @@ fn csharp_static_methods_bridge_record_and_diff() {
         "pub fn clamp(value: i64, lo: i64, hi: i64) -> Result<i64, String>",
         "pub fn words(text: String) -> Result<Vec<String>, String>",
         "pub fn first_index(text: String, needle: String) -> Result<Option<i64>, String>",
+        "pub fn digit(s: String) -> Result<i64, String>",
     ] {
         assert!(port.contains(signature), "{signature}\n{port}");
     }
@@ -1827,6 +1828,7 @@ fn csharp_static_methods_bridge_record_and_diff() {
         "\"error_type\":\"System.NullReferenceException\"",
         "{\"fn\":\"Mean\",\"args\":[[]],\"error\":\"mean of nothing\",\
          \"error_type\":\"System.InvalidOperationException\"}",
+        "\"error_type\":\"Acme.Geo.Geometry+ParseException\"",
     ] {
         assert!(cases.contains(expected), "{expected}");
     }
@@ -1884,6 +1886,12 @@ fn csharp_static_methods_bridge_record_and_diff() {
              let n = counts.get(w).and_then(serde_json::Value::as_i64).unwrap_or(0); \
              counts.insert(w.to_string(), (n + 1).into()); } \
              Ok(serde_json::Value::Object(counts))",
+        ),
+        (
+            "Digit",
+            "if s.len() == 1 && s.as_bytes()[0].is_ascii_digit() { \
+             Ok(i64::from(s.as_bytes()[0] - b'0')) } else { \
+             Err(\"Acme.Geo.Geometry+ParseException: not a digit\".into()) }",
         ),
     ] {
         let stub = format!("unimplemented!(\"port `{name}` from src/Geometry.cs\")");

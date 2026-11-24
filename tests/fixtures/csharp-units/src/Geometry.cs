@@ -67,6 +67,14 @@ public static class Geometry
         return i < 0 ? null : i;
     }
 
+    public sealed class ParseException : Exception
+    {
+        public ParseException(string m) : base(m) { }
+    }
+
+    public static int Digit(string s) =>
+        s.Length == 1 && char.IsDigit(s[0]) ? s[0] - '0' : throw new ParseException("not a digit");
+
     public static T Identity<T>(T value) => value;
 
     public static decimal Price(decimal amount) => amount * 1.2m;
