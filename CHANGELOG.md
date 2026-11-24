@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `report` says "Nx slower" for a port slower than the original in the card's `aria-label` and in
+  REPORT.md's speedup rows, instead of "0.0x faster" and `0.0x` (#433).
 - `analyze` and `map` count lines of code the way `gate`'s size check does, leaving out comment
   lines, so licence headers and JSDoc no longer move a file's Lines, Start here or priority (#342).
 - `profile` and `go` on a Node that refuses `--cpu-prof` in `NODE_OPTIONS` (22.14) pass it to a `node`
