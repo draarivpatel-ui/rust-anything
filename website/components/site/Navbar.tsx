@@ -37,9 +37,7 @@ function LanguageMenu({ currentPath, locale, label }: { currentPath: string; loc
         aria-label={label}
         title={label}
       >
-        <span className="text-[18px] leading-none" aria-hidden>
-          {current.flag}
-        </span>
+        <Flag l={current} />
         <span className="hidden xl:inline">{current.name}</span>
         <svg className="hidden opacity-60 sm:block" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden>
           <path d="M6 9l6 6 6-6" />
@@ -64,9 +62,7 @@ function LanguageMenu({ currentPath, locale, label }: { currentPath: string; loc
                     } catch {}
                   }}
                 >
-                  <span className="text-[18px] leading-none" aria-hidden>
-                    {l.flag}
-                  </span>
+                  <Flag l={l} />
                   <span className="min-w-0 flex-1 truncate">{l.name}</span>
                   {on && (
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
@@ -240,5 +236,28 @@ export default function Navbar({
 
       <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} ui={ui} locale={locale} />
     </div>
+  )
+}
+
+function Flag({ l }: { l: (typeof LOCALES)[number] }) {
+  const country = 'country' in l ? l.country : undefined
+  if (!country) {
+    return (
+      <svg className="h-[15px] w-5 shrink-0 text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z" />
+      </svg>
+    )
+  }
+  return (
+    <img
+      src={`/flags/${country}.svg`}
+      width={20}
+      height={15}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      className="h-[15px] w-5 shrink-0 rounded-[2px] object-cover ring-1 ring-black/10"
+    />
   )
 }

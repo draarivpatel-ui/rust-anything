@@ -56,7 +56,12 @@ rust-anything app record . --effects http,smtp --effect-env WEBHOOK_URL=http-url
   setting like this.
 - **`--db-reset` and `--db-dump`** are shell commands: reset puts the database in a known state
   before each case (each start, for servers), and dump prints its state after each case (each
-  request, for servers). Cases then run one at a time.
+  request, for servers). Cases then run one at a time. Both run in the folder the case runs in
+  (the server's, with `--fresh`), so `app.db` is the one the app opened; a script they name by a
+  relative path (`scripts/reset-db.sh`, `reset.py`, `< schema.sql`) is still the repository's. That
+  holds for files with a script extension (`.py`, `.sh`, `.bash`, `.js`, `.mjs`, `.cjs`, `.ts`,
+  `.rb`, `.php`, `.pl`, `.ps1`, `.bat`, `.cmd`, `.sql`); any other relative path, an
+  extensionless script or the target of `>` included, is the case folder's.
 
 What reached the sinks is stored as `<case>.effects` next to the case and compared like stdout:
 the count and order of effects matter, values that differed between the original's two runs
@@ -88,6 +93,13 @@ rust-anything app replay . --build "target/release/mytool"
 - Cases are [trycmd](https://docs.rs/trycmd) files in `rust/app-cases/`: `<case>.toml` (argv, env,
   exit code), `.stdin`, `.stdout`, `.stderr`, `.in/` (files in) and `.out/` (files written). Read
   and edit them by hand; a Rust test can run them with `trycmd` once the port has a binary.
+- Recording again replaces what the last recording wrote: a case it no longer writes (its input
+  was removed or renamed, or the original timed out on it) is deleted, in `http/` too. The names
+  are kept in `rust-anything.json` as `recorded`, so a case you added by hand is left in place,
+  and `app record` names it, even when an input of its name timed out. A removed case's `.in/`
+  folder stays while the `fs.base` of a case that is kept is in it or goes through it.
+  The names count only in the folder they were recorded in: after switching between a CLI and
+  `--http`, nothing is removed.
 - `app replay` runs any build against the cases, prints `passed/total`, writes
   `rust/app-cases/replay-report.md` with a diff per failing case, and exits non-zero on any
   mismatch. A build that appends to the file named by `RUST_ANYTHING_FALLBACK_LOG` (one line per

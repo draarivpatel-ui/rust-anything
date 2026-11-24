@@ -111,6 +111,10 @@ pub struct Config {
     /// before every case; a path ending in `/` gives its contents.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fresh: Vec<String>,
+    /// The cases the last `app record` wrote, so the next one can remove those it no longer
+    /// writes without touching cases written by hand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recorded: Vec<String>,
 }
 
 pub(crate) fn default_timeout() -> u64 {
@@ -412,6 +416,15 @@ fn run_in(
         }
         std::fs::write(&target, bytes)?;
     }
+    // The database lives where the case runs, so reset it there, before taking the snapshot that
+    // tells the case's own writes apart.
+    let sinks = effects
+        .map(|config| -> Result<_> {
+            let sinks = crate::effects::Sinks::start(config)?;
+            sinks.reset(&work, repo)?;
+            Ok(sinks)
+        })
+        .transpose()?;
     let before: BTreeMap<PathBuf, FileStamp> = walk_files(&work)
         .into_iter()
         .filter_map(|path| {
@@ -442,13 +455,6 @@ fn run_in(
     for key in &case.env_remove {
         cmd.env_remove(key);
     }
-    let sinks = effects
-        .map(|config| -> Result<_> {
-            let sinks = crate::effects::Sinks::start(config)?;
-            sinks.reset(repo)?;
-            Ok(sinks)
-        })
-        .transpose()?;
     if let Some(sinks) = &sinks {
         cmd.envs(sinks.env());
     }
@@ -550,7 +556,7 @@ fn run_in(
         .cloned()
         .collect();
     let fallback = std::fs::metadata(&log).ok().map(|m| m.len() > 0);
-    let effects = sinks.map(|s| redact(s.take(repo)));
+    let effects = sinks.map(|s| redact(s.take(&work, repo)));
     Ok(Run {
         stdout: redact(stdout),
         stderr: redact(stderr),
@@ -1491,6 +1497,110 @@ pub struct RecordOutcome {
     pub unstable: Vec<String>,
     /// Cases not written: the original timed out or did not answer.
     pub timed_out: Vec<String>,
+    /// The cases this recording wrote.
+    pub recorded: Vec<String>,
+    /// Cases the last recording in this folder wrote and this one did not (a timeout included):
+    /// removed, apart from files a case that stays reads (`fs.base`).
+    pub stale: Vec<String>,
+    /// Cases in the folder that no recording wrote (by hand, or before the list was kept):
+    /// left in place.
+    pub kept: Vec<String>,
+}
+
+/// What each case's files are called after its name.
+const CASE_FILES: [&str; 9] = [
+    "toml",
+    "stdin",
+    "stdout",
+    "stderr",
+    REMOVED_EXT,
+    crate::effects::EXT,
+    "body",
+    "in",
+    "out",
+];
+
+/// Removes the cases the last recording in this folder wrote (`previous`) that this one did not
+/// write, and names the cases in the folder that did not come from a recording, which it keeps.
+/// Only `previous` marks a case as a recording's: a case written by hand stays even when an input
+/// of its name timed out now. Files a case that stays reads through `fs.base` (that folder, or one
+/// inside it) stay too.
+pub(crate) fn drop_stale(outcome: &mut RecordOutcome, previous: &[String]) -> Result<()> {
+    let written: BTreeSet<&str> = outcome.recorded.iter().map(String::as_str).collect();
+    let ours: BTreeSet<&str> = previous
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !written.contains(name))
+        .collect();
+    let read = bases_read(&outcome.dir, &ours);
+    let mut stale = Vec::new();
+    for name in &ours {
+        if outcome.dir.join(format!("{name}.toml")).is_file() {
+            stale.push((*name).to_string());
+        }
+        for ext in CASE_FILES {
+            let path = outcome.dir.join(format!("{name}.{ext}"));
+            // A folder a case that stays reads, holds one it reads, or is on the way to it as
+            // written: `two.in/sub`, `../app-cases/two.in/sub` (resolved) and `two.in/../shared`
+            // (on Unix only found while `two.in` exists) all keep `two.in`.
+            let resolved = path.canonicalize().ok();
+            if read.iter().any(|base| {
+                base.starts_with(&path) || resolved.as_ref().is_some_and(|r| base.starts_with(r))
+            }) {
+                continue;
+            }
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+            } else if path.is_file() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+    }
+    let mut kept: Vec<String> = std::fs::read_dir(&outcome.dir)?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.strip_suffix(".toml").map(str::to_string)
+        })
+        .filter(|name| !written.contains(name.as_str()))
+        .collect();
+    kept.sort();
+    outcome.stale = stale;
+    outcome.kept = kept;
+    Ok(())
+}
+
+/// The `fs.base` folders that the cases in `dir` other than `going` read, each as written (joined
+/// to `dir`) and, when it exists, resolved.
+fn bases_read(dir: &Path, going: &BTreeSet<&str>) -> BTreeSet<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return BTreeSet::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().is_some_and(|e| e == "toml")
+                && path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|stem| !going.contains(stem))
+        })
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter_map(|text| text.parse::<DocumentMut>().ok())
+        .filter_map(|doc| {
+            doc.get("fs")
+                .and_then(|f| f.get("base"))
+                .and_then(Item::as_str)
+                .map(|base| dir.join(base))
+        })
+        .flat_map(|base| {
+            let resolved = base.canonicalize().ok();
+            std::iter::once(base).chain(resolved)
+        })
+        .collect()
 }
 
 struct Recorded {
@@ -1725,6 +1835,12 @@ pub fn record(opts: &RecordOptions) -> Result<RecordOutcome> {
         .canonical()
         .with_context(|| format!("no folder {}", opts.repo.display()))?;
     let existing = Config::load(&repo)?;
+    // The names the last recording wrote, and whether it wrote them to `http/` or to the CLI
+    // folder: they are a recording's only in that folder.
+    let (previous, previous_http) = existing
+        .as_ref()
+        .map(|c| (c.recorded.clone(), c.http.is_some()))
+        .unwrap_or_default();
     let run = if !opts.run.is_empty() {
         opts.run.to_vec()
     } else if let Some(c) = &existing {
@@ -1794,6 +1910,7 @@ pub fn record(opts: &RecordOptions) -> Result<RecordOutcome> {
             opts.effects.clone(),
         ),
         fresh: Vec::new(),
+        recorded: Vec::new(),
     };
     if let Some(http) = config.http.as_mut() {
         if !opts.fresh.is_empty() {
@@ -1806,8 +1923,10 @@ pub fn record(opts: &RecordOptions) -> Result<RecordOutcome> {
     }
     let norm = Normalizers::new(&config)?;
     if config.http.is_some() {
-        let outcome = crate::http::record(&repo, &config, &norm, opts)?;
+        let mut outcome = crate::http::record(&repo, &config, &norm, opts)?;
         config.unordered = unordered_of(&outcome.noise);
+        drop_stale(&mut outcome, if previous_http { &previous } else { &[] })?;
+        config.recorded = outcome.recorded.clone();
         std::fs::write(
             cases_dir(&repo).join(CONFIG_FILE),
             serde_json::to_string_pretty(&config)? + "\n",
@@ -1892,6 +2011,9 @@ pub fn record(opts: &RecordOptions) -> Result<RecordOutcome> {
         noise: Vec::new(),
         unstable: Vec::new(),
         timed_out: Vec::new(),
+        recorded: Vec::new(),
+        stale: Vec::new(),
+        kept: Vec::new(),
     };
     for ((name, case), runs) in planned.iter().zip(runs) {
         let (one, two) = runs?;
@@ -1902,6 +2024,7 @@ pub fn record(opts: &RecordOptions) -> Result<RecordOutcome> {
         let rec = settle(&norm, case, &one, &two);
         write_case(&dir, &config.name, name, case, &rec)?;
         outcome.cases += 1;
+        outcome.recorded.push(name.clone());
         if !rec.noise.is_empty() {
             outcome.noisy.push(name.clone());
         }
@@ -1917,6 +2040,8 @@ pub fn record(opts: &RecordOptions) -> Result<RecordOutcome> {
         }
     }
     config.unordered = unordered_of(&outcome.noise);
+    drop_stale(&mut outcome, if previous_http { &[] } else { &previous })?;
+    config.recorded = outcome.recorded.clone();
     std::fs::write(
         dir.join(CONFIG_FILE),
         serde_json::to_string_pretty(&config)? + "\n",
@@ -2460,6 +2585,7 @@ pub fn replay(opts: &ReplayOptions) -> Result<ReplayOutcome> {
         unordered: BTreeMap::new(),
         effects: None,
         fresh: Vec::new(),
+        recorded: Vec::new(),
     });
     let norm = Normalizers::new(&config)?;
     let timeout = Duration::from_secs(opts.timeout_secs.unwrap_or(config.timeout_secs));
@@ -2597,6 +2723,7 @@ mod tests {
             unordered: BTreeMap::new(),
             effects: None,
             fresh: Vec::new(),
+            recorded: Vec::new(),
         })
         .unwrap()
     }
@@ -2770,6 +2897,7 @@ mod tests {
             unordered: BTreeMap::new(),
             effects: None,
             fresh: Vec::new(),
+            recorded: Vec::new(),
         })
         .unwrap();
         let kind = |a: &str, b: &str| settle_text(&norm, a.as_bytes(), b.as_bytes()).1;
@@ -2796,6 +2924,7 @@ mod tests {
             unordered: BTreeMap::from([("c".to_string(), vec!["stdout".to_string()])]),
             effects: None,
             fresh: Vec::new(),
+            recorded: Vec::new(),
         })
         .unwrap();
         assert!(norm.unordered("c", "stdout"));
@@ -2850,6 +2979,7 @@ mod tests {
             unordered: BTreeMap::new(),
             effects: None,
             fresh: Vec::new(),
+            recorded: Vec::new(),
         };
         let norm = Normalizers::new(&config).unwrap();
         assert_eq!(
