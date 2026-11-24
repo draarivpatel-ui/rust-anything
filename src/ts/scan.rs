@@ -156,7 +156,7 @@ pub fn scan(path: &str, source: &str) -> FileFacts {
             )
             .collect(),
         facts: FileFacts {
-            loc: source.lines().filter(|l| !l.trim().is_empty()).count(),
+            loc: crate::lang::syntax::loc(source, crate::lang::Lang::Ts),
             parse_errors: ret.diagnostics.len(),
             ..FileFacts::default()
         },
@@ -455,6 +455,17 @@ impl Collector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `analyze` and `map` count a file's lines the way `gate`'s size check does: a licence
+    /// header or JSDoc does not make a unit bigger.
+    #[test]
+    fn comment_lines_are_not_lines_of_code() {
+        let source = "/**\n * Counts words.\n *\n * @param s the text\n */\n\
+                      // a note\n// another\n\
+                      export function f(s: string) {\n  return s.length\n}\n";
+        assert_eq!(scan("src/f.ts", source).loc, 3);
+        assert_eq!(crate::lang::syntax::loc(source, crate::lang::Lang::Ts), 3);
+    }
 
     #[test]
     fn collects_imports_platforms_and_risks() {

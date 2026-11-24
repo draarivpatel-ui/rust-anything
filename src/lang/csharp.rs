@@ -186,7 +186,7 @@ fn pattern_risk(pattern: Option<Node>, source: &str) -> Option<Risk> {
 
 pub fn scan(source: &str) -> FileFacts {
     let mut facts = FileFacts {
-        loc: syntax::loc(source),
+        loc: syntax::loc(source, crate::lang::Lang::Csharp),
         ..FileFacts::default()
     };
     let Some(tree) = syntax::parse(&language(), source) else {

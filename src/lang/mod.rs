@@ -190,6 +190,17 @@ impl Lang {
         Self::Powershell,
     ];
 
+    /// Starts of a line that is a comment, not code, for counting lines of code. `* ` and `*/`
+    /// rather than `*`, so a C or Go line that starts with a dereference stays code.
+    pub fn comment_prefixes(self) -> &'static [&'static str] {
+        match self {
+            Lang::Python | Lang::Ruby => &["#"],
+            Lang::Php => &["//", "#", "/*", "* ", "*/"],
+            Lang::Powershell => &["#", "<#"],
+            _ => &["//", "/*", "* ", "*/"],
+        }
+    }
+
     /// File extensions of the language's source files.
     pub fn extensions(self) -> &'static [&'static str] {
         match self {

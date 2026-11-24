@@ -11,7 +11,7 @@ cargo install --path .
 `record`, `diff` and `bench` run the original in its own runtime: Node 22.6+ for TS (it runs `.ts`
 sources directly, adding `--experimental-strip-types` on 22.6 to 22.17), Python 3.9+ for Python
 and C (ctypes), Go 1.22+, Ruby 3+, JDK 17+ (`javac` and `java`), `kotlinc` for Kotlin, PHP 8+
-with the FFI extension, the .NET SDK (`dotnet`) for C#, and PowerShell 7.4+ (`pwsh`). `profile` on Node needs Node 24+, which allows `--cpu-prof` in `NODE_OPTIONS`. C also needs a C compiler. wasm bridges also need `rustup target add wasm32-unknown-unknown` and
+with the FFI extension, the .NET SDK (`dotnet`) for C#, and PowerShell 7.4+ (`pwsh`). `profile` passes `--cpu-prof` to a `node` command as arguments when that Node refuses it in `NODE_OPTIONS` (22.14 does); through a wrapper such as `npx` or `npm run` it needs a Node that allows it there (24 does). C also needs a C compiler. wasm bridges also need `rustup target add wasm32-unknown-unknown` and
 `cargo install wasm-bindgen-cli --version <the crate's wasm-bindgen version> --locked`; `build` names
 the exact version.
 

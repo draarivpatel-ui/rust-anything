@@ -546,7 +546,7 @@ fn runtime_check(
         (Some(b), _) => b.to_string(),
     };
     if r.name == "node" && status == Status::Ok && version.is_some_and(|v| v.0 < 24) {
-        detail.push_str("; works, but `profile` needs Node 24");
+        detail.push_str("; works, but `profile` through `npx` or `npm run` may need Node 24");
     }
     if r.name == "ruby" && status == Status::Outdated {
         detail.push_str("; magnus/rb-sys extensions do not build on Ruby 2");

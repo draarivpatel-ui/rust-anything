@@ -78,13 +78,6 @@ const GENERATED: [&str; 8] = [
 pub const MAX_GROWTH: f64 = 3.0;
 const ALLOWANCE: f64 = 50.0;
 
-fn code_lines(text: &str, comment: &[&str]) -> usize {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !comment.iter().any(|c| l.starts_with(c)))
-        .count()
-}
-
 fn files_under(path: &Path, extensions: &[&str]) -> Vec<std::path::PathBuf> {
     if path.is_file() {
         return vec![path.to_path_buf()];
@@ -155,12 +148,6 @@ pub(crate) fn with_local_imports(root: &Path, files: Vec<PathBuf>) -> Vec<PathBu
 }
 
 fn size_check(crate_dir: &Path, manifest: &Manifest) -> Option<Check> {
-    let source_comments: &[&str] = match manifest.language {
-        crate::lang::Lang::Python | crate::lang::Lang::Ruby => &["#"],
-        crate::lang::Lang::Php => &["//", "#", "/*", "*"],
-        crate::lang::Lang::Powershell => &["#", "<#"],
-        _ => &["//", "/*", "*"],
-    };
     let mut files = files_under(
         &manifest.root.join(&manifest.unit),
         manifest.language.extensions(),
@@ -179,7 +166,7 @@ fn size_check(crate_dir: &Path, manifest: &Manifest) -> Option<Check> {
     let source: usize = files
         .iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
-        .map(|t| code_lines(&t, source_comments))
+        .map(|t| crate::lang::syntax::loc(&t, manifest.language))
         .sum();
     if source == 0 {
         return None;
@@ -191,7 +178,7 @@ fn size_check(crate_dir: &Path, manifest: &Manifest) -> Option<Check> {
                 .is_none_or(|n| !GENERATED.contains(&n.to_string_lossy().as_ref()))
         })
         .filter_map(|p| std::fs::read_to_string(p).ok())
-        .map(|t| code_lines(&t, &["//"]))
+        .map(|t| crate::lang::syntax::code_lines(&t, &["//"]))
         .sum();
     let growth = rust as f64 / source as f64;
     let passed = rust as f64 <= MAX_GROWTH * source as f64 + ALLOWANCE;

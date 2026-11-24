@@ -435,24 +435,105 @@ fn in_repo(root: &Path, file: &str) -> bool {
 /// Functions, ms of waits on child processes no user function owns, and the run's ms.
 type Waited = (HashMap<Key, Acc>, f64, f64);
 
-fn node(root: &Path, command: &[String], work: &Path) -> Result<Waited> {
-    let dir = work.join("node");
-    std::fs::create_dir_all(&dir)?;
-    let mut options = std::env::var("NODE_OPTIONS").unwrap_or_default();
+/// How the workload starts with the CPU profiler on.
+#[derive(Debug, PartialEq)]
+struct NodeLaunch {
+    /// Arguments after the program.
+    args: Vec<String>,
+    /// `NODE_OPTIONS` to set, which also reaches the node processes a wrapper starts.
+    node_options: Option<String>,
+}
+
+/// Whether `program` is node itself rather than a wrapper such as `npx` or `npm`.
+fn is_node(program: &str) -> bool {
+    Path::new(program).file_stem().is_some_and(|s| s == "node")
+}
+
+/// Asks `program` for its version and whether it allows `--cpu-prof` in `NODE_OPTIONS`. It runs
+/// in the workload's directory, where a relative path or a version manager's shim finds the node
+/// the workload gets, and without `NODE_OPTIONS`, so a preload named there runs once, in the
+/// workload.
+fn cpu_prof_probe(program: &str, root: &Path) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.args([
+        "-p",
+        "process.version + ' ' + process.allowedNodeEnvironmentFlags.has('--cpu-prof')",
+    ])
+    .current_dir(root)
+    .env_remove("NODE_OPTIONS");
+    cmd
+}
+
+/// The version of a node that refuses `--cpu-prof` in `NODE_OPTIONS` (22.14 does; 22.23 and 26
+/// do not), asked of the node itself. `None` when it accepts the flag or could not be asked.
+fn node_refusing_cpu_prof_option(program: &str, root: &Path) -> Option<String> {
+    let out = crate::process::output(&mut cpu_prof_probe(program, root), crate::process::QUICK)
+        .ok()
+        .filter(|out| out.success())?;
+    let answer = out.stdout_text();
+    let (version, allowed) = answer.lines().next()?.trim().split_once(' ')?;
+    (allowed == "false").then(|| version.to_string())
+}
+
+/// `NODE_OPTIONS` reaches every node process, wrappers' children included, so it is used unless
+/// the node refuses `--cpu-prof` there (`refused` names that node's version). Such a node gets
+/// the flags as arguments, which every node accepts, and a wrapper is refused before it runs.
+fn node_launch(
+    command: &[String],
+    refused: Option<&str>,
+    dir: &Path,
+    inherited: &str,
+) -> Result<NodeLaunch> {
+    if let Some(version) = refused {
+        if !is_node(&command[0]) {
+            bail!(
+                "this Node ({version}) refuses --cpu-prof in NODE_OPTIONS, so `profile` cannot reach \
+                 the node that `{}` starts. Run the script with `node` directly, or use a newer Node \
+                 (24 allows it).",
+                command[0]
+            );
+        }
+        let mut args = vec![
+            "--cpu-prof".to_string(),
+            format!("--cpu-prof-dir={}", dir.to_string_lossy()),
+        ];
+        args.extend(command[1..].iter().cloned());
+        return Ok(NodeLaunch {
+            args,
+            node_options: None,
+        });
+    }
     let dir_option = dir
         .to_string_lossy()
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
-    options.push_str(&format!(" --cpu-prof --cpu-prof-dir=\"{dir_option}\""));
-    let status = crate::process::status(
-        Command::new(&command[0])
-            .stdout(std::io::stderr())
-            .args(&command[1..])
-            .current_dir(root)
-            .env("NODE_OPTIONS", options.trim()),
-        crate::process::TESTS,
-    )
-    .with_context(|| format!("running {}", command[0]))?;
+    let options = format!("{inherited} --cpu-prof --cpu-prof-dir=\"{dir_option}\"");
+    Ok(NodeLaunch {
+        args: command[1..].to_vec(),
+        node_options: Some(options.trim().to_string()),
+    })
+}
+
+fn node(root: &Path, command: &[String], work: &Path) -> Result<Waited> {
+    let dir = work.join("node");
+    std::fs::create_dir_all(&dir)?;
+    let probed = if is_node(&command[0]) {
+        command[0].as_str()
+    } else {
+        "node"
+    };
+    let refused = node_refusing_cpu_prof_option(probed, root);
+    let inherited = std::env::var("NODE_OPTIONS").unwrap_or_default();
+    let launch = node_launch(command, refused.as_deref(), &dir, &inherited)?;
+    let mut run = Command::new(&command[0]);
+    run.stdout(std::io::stderr())
+        .args(&launch.args)
+        .current_dir(root);
+    if let Some(options) = &launch.node_options {
+        run.env("NODE_OPTIONS", options);
+    }
+    let status = crate::process::status(&mut run, crate::process::TESTS)
+        .with_context(|| format!("running {}", command[0]))?;
     if !status.success() {
         bail!("the workload failed ({status})");
     }
@@ -1657,11 +1738,20 @@ fn report(
             let child_pct = (a.total_ms > 0.0 && a.waits_ms / a.total_ms >= 0.01)
                 .then(|| (100.0 * a.waits_ms / a.total_ms).min(100.0));
             let mut batch_spec = None;
+            let port_it = |u: &str| {
+                format!(
+                    "Hot and exported by `{u}`: port it (`rust-anything bridge {} {u}`), then check `rust-anything bench`.",
+                    root.display()
+                )
+            };
             let advice = match (&unit, &export) {
                 _ if child_pct.is_some_and(|p| p >= 50.0) => format!(
                     "Hot, but {:.0}% of its time waits on child processes. {CHILD_ADVICE}",
                     child_pct.unwrap_or_default()
                 ),
+                _ if is_top_level(&name, line) => {
+                    "The file's top level: nothing calls it and there is nothing to port. See the functions it calls.".into()
+                }
                 (Some((_, true)), Some(_)) if js_only.is_some() => format!(
                     "Hot, but `bridge` keeps `{name}` in {}: {}.",
                     lang.name(),
@@ -1672,24 +1762,33 @@ fn report(
                     let batch = batch_param(root, &(c.file.clone(), c.name.clone(), c.line), &name, &params);
                     batch_spec = batch.as_ref().map(|p| format!("{name}:{p}"));
                     let calls = a.calls.map_or_else(String::new, |n| format!(", {n} calls"));
+                    // A file's top level is not a function anyone could port with it.
+                    let portable_caller = !is_top_level(&c.name, c.line);
                     match batch {
                         Some(param) => format!(
                             "Called in a loop by `{}` ({}:{}{calls}): a call per item would cost more than the work. \
                              Batch it, keeping the items in Rust and using all cores: \
                              `rust-anything bridge {} {u} --batch {name}:{param}`, then prepare the items once in a \
-                             `{}Index` in port.rs. Better still, port `{}` with it.",
-                            c.name, c.file, c.line, root.display(), crate::codegen_batch::pascal(&name), c.name
+                             `{}Index` in port.rs.{}",
+                            c.name,
+                            c.file,
+                            c.line,
+                            root.display(),
+                            crate::codegen_batch::pascal(&name),
+                            if portable_caller {
+                                format!(" Better still, port `{}` with it.", c.name)
+                            } else {
+                                String::new()
+                            }
                         ),
-                        None => format!(
+                        None if portable_caller => format!(
                             "Mostly called by `{}` ({}:{}{calls}): port `{}` together with `{name}`, so one call into Rust does the whole loop.",
                             c.name, c.file, c.line, c.name
                         ),
+                        None => port_it(u),
                     }
                 }
-                (Some((u, true)), Some(_)) => format!(
-                    "Hot and exported by `{u}`: port it (`rust-anything bridge {} {u}`), then check `rust-anything bench`.",
-                    root.display()
-                ),
+                (Some((u, true)), Some(_)) => port_it(u),
                 (Some((u, true)), None) => format!("Hot inside `{u}`: port the exported function that calls it, with it."),
                 (Some((u, false)), _) => format!("Hot, but `{u}` must stay in the source language (see `rust-anything analyze`)."),
                 (None, _) => "Hot, outside the analyzed units.".into(),
@@ -1739,13 +1838,17 @@ fn report(
     }
 }
 
+/// A file's top level: Python's `<module>`, Node's module function on line 1.
+fn is_top_level(name: &str, line: u32) -> bool {
+    name == "<module>" || (line == 1 && name.starts_with("(anonymous)"))
+}
+
 /// Where the function `name` defined at `line` starts its child process: the call's line, and
 /// the program when the call names it literally. A call in a callback counts for the function
 /// around it, as the wait does. `None` when there is no such call, or several that start
 /// different programs.
 fn spawn_site(calls: &[SpawnCall], name: &str, line: u32) -> Option<(u32, Option<String>)> {
-    // A file's top level: Python's `<module>`, Node's module function on line 1.
-    let top = name == "<module>" || (line == 1 && name.starts_with("(anonymous)"));
+    let top = is_top_level(name, line);
     let own: Vec<&SpawnCall> = calls
         .iter()
         .filter(|c| {
@@ -2138,7 +2241,12 @@ pub fn markdown(r: &Report) -> String {
     }
     out.push_str("\n## What to port\n\n");
     let mut seen = BTreeMap::new();
-    for h in r.hot.iter().take(SHOWN).filter(|h| h.unit.is_some()) {
+    for h in r
+        .hot
+        .iter()
+        .take(SHOWN)
+        .filter(|h| h.unit.is_some() && !is_top_level(&h.name, h.line))
+    {
         if seen.insert(h.name.clone(), ()).is_some() {
             continue;
         }
@@ -3065,6 +3173,204 @@ mod tests {
         assert_eq!(json["hot"].as_array().unwrap().len(), 25);
         assert!(!markdown(&r).contains("`parse`"));
         assert_eq!(crate::go::pick(&r, None).unwrap().function, "parse");
+    }
+
+    #[test]
+    fn a_node_that_refuses_the_option_is_profiled_through_arguments() {
+        let dir = Path::new("/tmp/prof dir");
+        let cmd = |c: &[&str]| c.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // Node 22.14 refuses --cpu-prof in NODE_OPTIONS, so a `node` command gets it as arguments.
+        let launch = node_launch(
+            &cmd(&["node", "app.mjs", "--n", "3"]),
+            Some("v22.14.0"),
+            dir,
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            launch,
+            NodeLaunch {
+                args: cmd(&[
+                    "--cpu-prof",
+                    "--cpu-prof-dir=/tmp/prof dir",
+                    "app.mjs",
+                    "--n",
+                    "3"
+                ]),
+                node_options: None,
+            }
+        );
+        let by_path = node_launch(
+            &cmd(&["/usr/bin/node", "app.mjs"]),
+            Some("v20.0.0"),
+            dir,
+            "",
+        )
+        .unwrap();
+        assert_eq!(by_path.args[0], "--cpu-prof");
+
+        // A wrapper starts node itself, so only NODE_OPTIONS could reach it: say why it cannot.
+        let err =
+            node_launch(&cmd(&["npx", "tsx", "app.ts"]), Some("v22.14.0"), dir, "").unwrap_err();
+        let err = err.to_string();
+        assert!(
+            err.contains("v22.14.0") && err.contains("`npx`") && err.contains("`node` directly"),
+            "{err}"
+        );
+
+        // A node that accepts it, or one that could not be asked, keeps NODE_OPTIONS and what was in it.
+        let launch = node_launch(
+            &cmd(&["npm", "run", "bench"]),
+            None,
+            dir,
+            "--max-old-space-size=4096",
+        )
+        .unwrap();
+        assert_eq!(launch.args, cmd(&["run", "bench"]));
+        assert_eq!(
+            launch.node_options.as_deref(),
+            Some("--max-old-space-size=4096 --cpu-prof --cpu-prof-dir=\"/tmp/prof dir\"")
+        );
+    }
+
+    #[test]
+    fn the_node_is_asked_where_the_workload_runs_and_without_node_options() {
+        // In the workload's directory a relative `./bin/node`, or a version manager's shim, is
+        // the node the workload gets. A `--require` in NODE_OPTIONS must run once, in the workload.
+        let root = Path::new("/repo");
+        let probe = cpu_prof_probe("./bin/node", root);
+        assert_eq!(probe.get_program(), "./bin/node");
+        assert_eq!(probe.get_current_dir(), Some(root));
+        assert!(
+            probe
+                .get_envs()
+                .any(|(key, value)| key == "NODE_OPTIONS" && value.is_none()),
+            "{probe:?}"
+        );
+    }
+
+    #[test]
+    fn a_script_top_level_is_not_offered_for_porting() {
+        let root = std::env::temp_dir().join(format!("rust-anything-top-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"lev\"\n").unwrap();
+        std::fs::write(
+            root.join("lib.py"),
+            "def lev(a, b):\n    return abs(len(a) - len(b))\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app.py"),
+            "from lib import lev\n\nfor _ in range(3000):\n    lev(\"kitten\", \"sitting\")\n",
+        )
+        .unwrap();
+        let functions: HashMap<Key, Acc> = [
+            (
+                ("app.py".to_string(), "<module>".to_string(), 1),
+                Acc {
+                    self_ms: 1.0,
+                    total_ms: 118.0,
+                    calls: Some(1),
+                    ..Default::default()
+                },
+            ),
+            (
+                ("lib.py".to_string(), "lev".to_string(), 1),
+                Acc {
+                    self_ms: 76.0,
+                    total_ms: 116.0,
+                    calls: Some(3000),
+                    ..Default::default()
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let r = report(
+            &root,
+            Lang::Python,
+            &["python3".into()],
+            functions,
+            0.0,
+            274.0,
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        let top = r
+            .hot
+            .iter()
+            .find(|h| h.name == "<module>")
+            .expect("the top level is still measured");
+        assert!(
+            !top.advice.contains("port the exported function"),
+            "advice for a top level: {}",
+            top.advice
+        );
+        let to_port = markdown(&r);
+        let to_port = to_port.split("## What to port").nth(1).expect("section");
+        assert!(!to_port.contains("`<module>`"), "{to_port}");
+        assert!(to_port.contains("`lev`"), "{to_port}");
+    }
+
+    #[test]
+    fn a_top_level_caller_is_not_offered_for_porting() {
+        let root =
+            std::env::temp_dir().join(format!("rust-anything-top-caller-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"lev\"\n").unwrap();
+        std::fs::write(
+            root.join("lib.py"),
+            "def lev(a, b):\n    return abs(len(a) - len(b))\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app.py"),
+            "from lib import lev\n\nfor _ in range(3000):\n    lev(\"kitten\", \"sitting\")\n",
+        )
+        .unwrap();
+        // 10 us a call, called from the script's top level: the loop-caller advice applies.
+        let module = ("app.py".to_string(), "<module>".to_string(), 1);
+        let functions: HashMap<Key, Acc> = [
+            (
+                module.clone(),
+                Acc {
+                    self_ms: 5.0,
+                    total_ms: 35.0,
+                    calls: Some(1),
+                    ..Default::default()
+                },
+            ),
+            (
+                ("lib.py".to_string(), "lev".to_string(), 1),
+                Acc {
+                    self_ms: 30.0,
+                    total_ms: 30.0,
+                    calls: Some(3000),
+                    callers: [(module, (30.0, Some(3000)))].into_iter().collect(),
+                    ..Default::default()
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let r = report(
+            &root,
+            Lang::Python,
+            &["python3".into()],
+            functions,
+            0.0,
+            35.0,
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        let lev = r.hot.iter().find(|h| h.name == "lev").expect("lev is hot");
+        assert!(!lev.advice.contains("port `<module>`"), "{}", lev.advice);
+        assert!(
+            lev.advice.contains("port it (`rust-anything bridge"),
+            "{}",
+            lev.advice
+        );
     }
 
     #[test]

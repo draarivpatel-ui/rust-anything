@@ -67,7 +67,7 @@ prints what to use instead.
 
 | Language | `analyze` | whole app | unit bridge | `record`/`diff` | `shadow` | `enable` | `profile` | `package` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| TypeScript/JavaScript | yes | yes | napi-rs, wasm-bindgen | yes | yes | yes (napi, wasm) | yes (Node 24) | napi, wasm, CLI front door |
+| TypeScript/JavaScript | yes | yes | napi-rs, wasm-bindgen | yes | yes | yes (napi, wasm) | yes (`node` on 22.6+; `npx` and `npm run` where Node allows `--cpu-prof` in `NODE_OPTIONS`, as 24 does) | napi, wasm, CLI front door |
 | Python | yes | yes | PyO3 | yes | yes (module) | yes (PyO3) | yes | PyO3, CLI front door |
 | C | yes | yes | `extern "C"` drop-in | yes | yes (`CAbi` file) | no | no (`perf record -g`) | no |
 | Go | yes | yes | dispatcher + generated driver | yes | yes | no | yes | no |

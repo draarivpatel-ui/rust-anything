@@ -161,7 +161,7 @@ fn join(dir: &str, rest: &str) -> String {
 
 pub fn scan(source: &str) -> FileFacts {
     let mut facts = FileFacts {
-        loc: syntax::loc(source),
+        loc: syntax::loc(source, crate::lang::Lang::Kotlin),
         ..FileFacts::default()
     };
     let Some(tree) = syntax::parse(&language(), source) else {

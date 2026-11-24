@@ -150,7 +150,7 @@ pub fn discover(root: &Path) -> Result<Workspace> {
 
 pub fn scan(source: &str) -> FileFacts {
     let mut facts = FileFacts {
-        loc: syntax::loc(source),
+        loc: syntax::loc(source, crate::lang::Lang::Go),
         ..FileFacts::default()
     };
     let Some(tree) = syntax::parse(&language(), source) else {
