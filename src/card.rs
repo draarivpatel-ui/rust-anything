@@ -165,6 +165,25 @@ fn times(x: f64) -> String {
     }
 }
 
+/// "Nx faster" at or above parity, "Nx slower" below it, the way the card's headline reads.
+fn speed_phrase(speedup: f64) -> String {
+    if speedup >= 1.0 {
+        format!("{} faster", times(speedup))
+    } else {
+        format!("{} slower", times(1.0 / speedup.max(1e-9)))
+    }
+}
+
+/// A table cell keeps the bare `Nx` for a faster port; below parity it names the slowdown so a
+/// speedup like 0.04 can never print as `0.0x`.
+fn table_speed(speedup: f64) -> String {
+    if speedup >= 1.0 {
+        times(speedup)
+    } else {
+        speed_phrase(speedup)
+    }
+}
+
 /// Each threshold is the value at which the unit below it would print as `1000` of that unit,
 /// rounded: `999_999 ns` is `1000.0 µs`, so it belongs in `ms`.
 fn ns(v: f64) -> String {
@@ -215,7 +234,7 @@ pub fn markdown(card: &Card) -> String {
         card.language,
         card.matched,
         card.cases,
-        times(card.speedup),
+        table_speed(card.speedup),
         fallback_percent(card),
         card.fallback_cases,
         card.cases,
@@ -233,7 +252,7 @@ pub fn markdown(card: &Card) -> String {
                 r.cases,
                 ns(r.original_ns),
                 ns(r.rust_ns),
-                times(r.speedup)
+                table_speed(r.speedup)
             );
         }
         out.push('\n');
@@ -310,11 +329,11 @@ pub fn svg(card: &Card) -> String {
 </svg>
 "##,
         label = esc(&format!(
-            "{}: {} of {} recorded cases match, {} faster",
+            "{}: {} of {} recorded cases match, {}",
             card.crate_name,
             card.matched,
             card.cases,
-            times(card.speedup)
+            speed_phrase(card.speedup)
         )),
         name = esc(&card.crate_name),
         title_size = if card.crate_name.chars().count() > 22 {
@@ -334,11 +353,7 @@ pub fn svg(card: &Card) -> String {
         } else {
             "off"
         },
-        speed = if card.speedup >= 1.0 {
-            format!("{} faster", times(card.speedup))
-        } else {
-            format!("{} slower", times(1.0 / card.speedup.max(1e-9)))
-        },
+        speed = speed_phrase(card.speedup),
         crab = include_str!("card_crab.svg").trim(),
         fallback = esc(&fallback_percent(card)),
         machine = esc(&card.machine),
@@ -438,6 +453,32 @@ mod tests {
         assert!(svg(&c).contains("Fallback to the original: 100.0% of cases"));
         c.fallback_cases = 1;
         assert!(svg(&c).contains("Fallback to the original: 0.1% of cases"));
+    }
+
+    #[test]
+    fn a_slower_port_says_slower_in_the_label_and_tables_too() {
+        let mut c = card();
+        c.speedup = 0.04;
+        c.bench[0].original_ns = 290_000.0;
+        c.bench[0].rust_ns = 9_120_000.0;
+        c.bench[0].speedup = 0.04;
+        let svg = svg(&c);
+        for want in [
+            "aria-label=\"fuzzy-rs: 412 of 412 recorded cases match, 25x slower\"",
+            "<tspan font-weight=\"700\" fill=\"#e8561a\">25x slower</tspan>",
+        ] {
+            assert!(svg.contains(want), "{want} missing:\n{svg}");
+        }
+        assert!(!svg.contains("0.0x"), "{svg}");
+        let md = markdown(&c);
+        assert!(
+            md.contains("| Speedup, call included | 25x slower (geometric mean) |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| `dedupe` | 412 | 290.0 µs | 9.1 ms | 25x slower |"),
+            "{md}"
+        );
     }
 
     #[test]
